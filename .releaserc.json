@@ -1,0 +1,26 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "make clean all VERSION=${nextRelease.version}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          {
+            "path": "build/ps5-mcp.elf",
+            "name": "ps5-mcp-${nextRelease.version}.elf",
+            "label": "ps5-mcp.elf (v${nextRelease.version})"
+          }
+        ]
+      }
+    ]
+  ]
+}

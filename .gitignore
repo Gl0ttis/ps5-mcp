@@ -1,0 +1,17 @@
+# build output
+build/
+*.o
+*.elf
+
+# reference checkouts (not part of this project)
+refs/
+
+# local research data and notes
+scratch/
+
+# local settings and tooling cruft
+.env
+__pycache__/
+*.pyc
+.claude/
+

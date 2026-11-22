@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, test and release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and test
+        uses: ./.github/actions/build-and-test
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Works out the next version from the Conventional Commits since the last
+      # tag (fix: patch, feat: minor, BREAKING CHANGE / !: major), rebuilds the
+      # payload with that version baked in, tags vX.Y.Z and publishes a GitHub
+      # release with build/ps5-mcp.elf attached. No release-worthy commits: no
+      # release.
+      - name: Semantic Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx --yes -p semantic-release@24 -p @semantic-release/exec@6 semantic-release
