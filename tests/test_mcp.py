@@ -260,7 +260,8 @@ def pad_and_screens(c, root):
     check("bad sequence rejected before pressing",
           r["isError"] and "nothing was pressed" in text_of(r), text_of(r))
     t = time.time()
-    r = c.call("pad_sequence", steps="down*2 cross:200 wait:100 ls:up:100 rs:0.5,-0.5:50 shot")
+    r = c.call("pad_sequence", steps="down*2 cross:200 wait:100 ls:up:100 rs:0.5,-0.5:50 shot",
+               screenshot={"mode": "system"})
     imgs = images_of(r)
     check("sequence with shot returns an image", not r["isError"] and len(imgs) == 1, text_of(r))
     if imgs:
@@ -272,8 +273,8 @@ def pad_and_screens(c, root):
         photos += [f for f in files if f.endswith(".png")]
     check("system capture deleted after delivery", photos == [], photos)
 
-    r = c.call("screenshot", crop={"x": 0, "y": 0, "width": 480, "height": 480}, max_width=0,
-               format="png", keep_on_console=True)
+    r = c.call("screenshot", mode="system", crop={"x": 0, "y": 0, "width": 480, "height": 480},
+               max_width=0, format="png", keep_on_console=True)
     imgs = images_of(r)
     check("cropped PNG at source scale", imgs and image_size(imgs[0]) == (480, 480)
           and imgs[0]["mimeType"] == "image/png", text_of(r))
@@ -338,7 +339,7 @@ def pad_and_screens(c, root):
     st = c.call("pad_status")["structuredContent"]["held"]
     check("pad_release neutral", st["buttons"] == "none" and st["lx"] == 128, st)
     r = c.call("pad_press", buttons="cross", screenshot_after=True, settle_ms=0,
-               screenshot={"max_width": 320})
+               screenshot={"mode": "system", "max_width": 320})
     check("press with screenshot_after", images_of(r) and image_size(images_of(r)[0]) == (320, 180),
           text_of(r))
     r = c.call("pad_sequence", steps="wait:130000")

@@ -9,10 +9,10 @@
 
 typedef enum
 {
+    SHOT_NATIVE, /* fresh 4K compose via pt_call into SceShellUI + compositor shm read */
     SHOT_SYSTEM, /* the console's own screenshot: hold Create, take the new file */
     SHOT_TITLE,  /* ask a title with the grab hook for its frame */
     SHOT_LATEST, /* the newest existing capture, nothing new is taken */
-    SHOT_NATIVE, /* in-process compositor flip: ~500 ms, no pad, HDR-safe. */
 } shot_mode_t;
 
 typedef struct shot_opts
@@ -35,14 +35,14 @@ int shot_take(const shot_opts_t *opts, tool_result_t *r);
 
 /* The screenshot arguments as JSON Schema properties (single-quoted). */
 #define SHOT_SCHEMA_PROPS                                                                          \
-    "'mode':{'type':'string','enum':['system','title','latest','native'],'default':'system',"      \
-    "'description':'system (default): the whole screen by holding Create on the virtual pad "     \
-    "(needs pad_open, ~3 s; captures are JPEG XR with HDR on and unreadable). title: the "        \
-    "running title own frame via the grab hook (~1 s). latest: the newest existing capture, "    \
-    "nothing new is taken. native: triggers a fresh 4K compose by pt_call\\'ing "                \
-    "sceScreenshotCaptureForCoreDump inside SceShellUI (~200 ms SceShellUI freeze; no pad); "    \
-    "the composed BGRA frame is read directly from the compositor shm. Firmware-agnostic (all "  \
-    "offsets signature-scanned). Returns the current frame, not a cached one.'},"                \
+    "'mode':{'type':'string','enum':['native','system','title','latest'],'default':'native',"      \
+    "'description':'native (default): triggers a fresh 4K compose by pt_call\\'ing "              \
+    "sceScreenshotCaptureForCoreDump inside SceShellUI (~200 ms SceShellUI freeze; no pad, no "   \
+    "gallery file); the composed BGRA frame is read directly from the compositor shm. "            \
+    "Firmware-agnostic (all offsets signature-scanned). Returns the current frame, not a cached " \
+    "one. system: the whole screen by holding Create on the virtual pad (needs pad_open, ~3 s; "   \
+    "captures are JPEG XR with HDR on and unreadable). title: the running title own frame via "    \
+    "the grab hook (~1 s). latest: the newest existing capture, nothing new is taken.'},"          \
     "'max_width':{'type':'integer','default':1280,'minimum':0,'description':'Scale down to at "   \
     "most this width (0 keeps the source size).'},"                                                \
     "'max_height':{'type':'integer','default':0,'minimum':0},"                                     \

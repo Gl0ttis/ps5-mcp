@@ -133,7 +133,7 @@ static bool wait_new(const char *folder, const capture_t *before, int timeout_ms
 bool shot_opts_parse(const cJSON *args, shot_opts_t *o, tool_result_t *r)
 {
     memset(o, 0, sizeof(*o));
-    const char *mode = arg_str(args, "mode", "system");
+    const char *mode = arg_str(args, "mode", "native");
     if (strcmp(mode, "system") == 0)
         o->mode = SHOT_SYSTEM;
     else if (strcmp(mode, "title") == 0)
@@ -414,13 +414,13 @@ static const tool_def_t k_tools[] = {
     {
         "screenshot",
         "Screenshot",
-        "Take a picture of what the PS5 shows and return it as an image. mode=system (default) "
-        "captures the whole composited screen by holding Create on the virtual pad, then "
-        "deletes the file from the gallery (~3 s; needs pad_open; JPEG XR with HDR on and "
+        "Take a picture of what the PS5 shows and return it as an image. mode=native (default) "
+        "triggers a fresh 4K compose inside SceShellUI via pt_call (no pad, no gallery file, "
+        "~200 ms SceShellUI freeze) and reads the composed BGRA frame from the compositor shm. "
+        "mode=system captures the whole composited screen by holding Create on the virtual pad, "
+        "then deletes the file from the gallery (~3 s; needs pad_open; JPEG XR with HDR on and "
         "unreadable on the console). mode=title asks the running title via the grab hook. "
-        "mode=latest returns the newest existing capture. mode=native triggers a fresh 4K "
-        "compose inside SceShellUI via pt_call (no pad, ~200 ms SceShellUI freeze) and reads "
-        "the composed BGRA frame from the compositor shm.",
+        "mode=latest returns the newest existing capture.",
         "{'type':'object','properties':{" SHOT_SCHEMA_PROPS "}}",
         0,
         tool_screenshot,

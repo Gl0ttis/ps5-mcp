@@ -31,7 +31,7 @@ claude mcp add --transport http ps5 http://<console-ip>:7165/mcp
 | `pad_press` | Press a button or chord (`cross`, `l1+r1`), with repeat, and an optional screenshot after |
 | `pad_hold` | Hold buttons, sticks (-1..1), triggers (0..1) or a touchpad finger, for a duration or until released |
 | `pad_sequence` | `"down*2 cross wait:1500 ls:up:400 shot"`: presses, stick moves, waits and screenshots, timed on the console and validated before the first press |
-| `screenshot` | `system` (whole screen via the console's screenshot), `title` (the title's own frame via the grab hook), `latest` (newest existing capture), `native` (triggers a fresh 4K compose inside SceShellUI via ptrace and reads the frame from the compositor shared memory; no pad, no gallery file, ~200 ms SceShellUI freeze). Supports `max_width`, `crop` (to read small text), `format`, `quality`, `grayscale` |
+| `screenshot` | `native` (default — triggers a fresh 4K compose inside SceShellUI via ptrace and reads the frame from the compositor shared memory; no pad, no gallery file, ~200 ms SceShellUI freeze), `system` (whole screen via the console's own Create-hold capture), `title` (the title's own frame via the grab hook), `latest` (newest existing capture). Supports `max_width`, `crop` (to read small text), `format`, `quality`, `grayscale` |
 | `system_info` | Firmware, model, temperatures, CPU clock, memory, uptime, foreground user, running title, IPs, free storage, and server state |
 | `list_processes` | Table or JSON of every process: pid, ppid, state, threads, CPU%, authid, title id, RSS/VSZ; filter and sort |
 | `process_info` | One process's threads (name, state, CPU time), and optionally its memory map and open files |
@@ -187,23 +187,30 @@ names works too.
 With **HDR on**, console captures are JPEG XR. They can't be decoded on the console, so
 the tool says so and leaves the capture on the console. Turn HDR off for agent sessions.
 
-#### Native capture (experimental, cached)
+#### Native capture (default)
 
-`mode=native` reads the compositor's screenshot cache, `CompositorShmScreenshotMem` at
-`0x4000000000`, directly. The payload registers with `AgcCompositor` through
-`libSceComposite` (sets app category `0x01000000` via `sceKernelSetAppInfo`, authid
-`0x480000000000000f`), gets its own view of the shared cache, queries the display
-resolution with `sceVideoOutGetResolutionStatus`, scans the cache for the opaque run and
-reads it out with `kernel_proc_copyout` — no pad, no Create hold.
+`mode=native` is the default and triggers a fresh, live 4K compose on every call. No pad,
+no Create hold, no file written to the gallery, and the whole composited screen is
+captured (home screen, system dialogs and overlays included). Typical cost is about 1.5 s
+end-to-end on the first call per SceShellUI PID, dropping to ~200 ms on later calls once
+the per-PID offsets are cached.
 
-**The cache is not written per flip.** `AgcCompositor` only signals a per-client event
-flag when commands are queued; the actual scanout → cache GPU dispatch is performed by
-`SceShellCore`'s trophy/screenshot handler, which runs when a real screenshot event
-fires (a Create hold on the pad, or a trophy capture). From a payload the NP gate blocks
-the trophy path, and nothing else we send touches the cache, so `mode=native` returns
-the **last cached frame** — fresh right after a `mode=system` call, but potentially
-seconds or minutes old otherwise. It is kept for diagnostics and as the skeleton of a
-future true-live path; `mode=system` remains the way to capture the current screen.
+The payload finds SceShellUI's main executable through `sysctl KERN_PROC_VMMAP`, then
+signature-scans the text segment for two addresses: the internal
+`sceScreenshotCaptureForCoreDump` function (the compose-config byte sequence
+`48 B? 93 00 00 00 (03|05)` lives in its prologue) and the compositor shared-memory base
+pointer (loaded by the `TZCNT` + `SHL 0x19` sequence in one of the compose vtable
+methods). A single byte in the function is patched from mode 3 (720p) to mode 5 (4K),
+ptrace attaches to SceShellUI, a fast-trap `pt_call` invokes the patched function
+synchronously inside SceShellUI, the mode byte is reverted, and ptrace detaches. The
+composed 3840×2160 BGRA frame lives in the compositor shared memory at a deterministic
+offset from the scanned base pointer; it is read out with `kernel_proc_copyout`, scaled
+and encoded on the console, and returned as an MCP image. The intermediate file that
+CoreDump's save step writes before failing its format check is `unlink()`ed on the way
+out, so the filesystem stays clean.
+
+All SceShellUI offsets are discovered at runtime, so the path is firmware-agnostic — no
+addresses are baked into the build.
 
 ## What has been verified
 
@@ -211,10 +218,10 @@ future true-live path; `mode=system` remains the way to capture the current scre
 | --- | --- |
 | MCP protocol, HTTP layer, tool logic | **Tested** on the host build: `make test` (88 checks, ASan + UBSan clean) and the official MCP Python SDK client (mcp 2.3.0). The mock backend replaces only the system calls. The klog parsing, eviction choice, capture pipeline, image processing and ELF-loader protocol run the same code as on the console |
 | klog formats (DEVICE_ADDED, `[CIM]` controller table) | The format strings were read from SceShellCore (firmware build 1777439). Not yet observed live |
-| `mode=native` capture via `libSceComposite` | **Run on a 13.20 console (CFI-7119).** Returns a clean composited 4K BGRA frame through the chain described above, but **the cache is only refreshed by real screenshot events** (Create hold, trophy capture) — a native-mode call can return a frame that is seconds or minutes old. Kept experimental; `mode=system` is the default and remains the live path. |
+| `mode=native` fresh 4K compose via ptrace + CoreDump | **Run on a 13.20 console (CFI-7119).** The default screenshot mode. Returns a live composited 3840×2160 BGRA frame on every call, scaled and encoded on the console. First call per SceShellUI PID is ~1.5 s (signature-scanning the ~47 MB eboot); later calls ~200 ms. All SceShellUI offsets are discovered at runtime so the build has no firmware-specific addresses. |
 | PS5 payload | **Builds and links** against the ps5-payload-dev SDK |
 | Console paths (`/user/av_contents/photo`, `/user/app`, appmeta `param.json` layout) | Checked against a real console's filesystem |
-| Read-only tools on a console | **Run on a 13.20 console (CFI-7119)** through Payload Manager: `system_info`, `list_processes`, `klog_read` and the native-capture probes work as described |
+| Read-only tools on a console | **Run on a 13.20 console (CFI-7119)** through Payload Manager: `system_info`, `list_processes`, `klog_read` work as described |
 | Pad and Create-hold capture on a console | **Run on a 13.20 console** with a USB DualSense and ASTRO's PLAYROOM: `pad_open` both ways (exclusive evicted the USB pad, then recreated the virtual pad so it took the first slot; the game then read it), buttons, both sticks, both triggers (held through a screenshot), `screenshot mode=system` with `crop`, `pad_sequence` with `shot`, `pad_close`, `app_launch` and `app_kill`. Touchpad input is sent without error but unconfirmed (nothing on screen showed it). Not yet run: `mode=title`, `elf_run` |
 
 Every console-facing tool returns the raw result code of each system call (for example
@@ -223,8 +230,9 @@ another firmware works from the tool output.
 
 ## Limits
 
-- Pictures are stills, not video. `mode=system` costs about 3 s, and some titles block
-  screenshots.
+- Pictures are stills, not video. `mode=native` costs ~200 ms (plus a one-time ~1.5 s
+  scan on the first call per SceShellUI PID); `mode=system` costs about 3 s. Some titles
+  block the `system` path.
 - A title reads only its user's first controller slot. `pad_open` therefore disconnects
   the real one by default, then recreates the virtual pad so it takes that first slot (a
   pad keeps the slot it was given). The PS button on the real controller reconnects it. `exclusive=false` keeps it, but
