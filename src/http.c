@@ -311,15 +311,21 @@ void http_stop(void)
     atomic_store(&g_stop, true);
 }
 
-int http_serve(uint16_t port, http_handler_t handler)
+/* The listening socket, so http_kick_listener can break it from a signal handler. */
+static volatile int g_listen_fd = -1;
+
+void http_kick_listener(void)
 {
-    g_handler = handler;
+    const int fd = g_listen_fd;
+    if (fd >= 0)
+        shutdown(fd, SHUT_RDWR); /* async-signal-safe */
+}
+
+static int open_listener(uint16_t port)
+{
     const int server = socket(AF_INET, SOCK_STREAM, 0);
     if (server < 0)
-    {
-        log_msg("socket: %s", strerror(errno));
         return -1;
-    }
     int one = 1;
     setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in addr;
@@ -329,8 +335,94 @@ int http_serve(uint16_t port, http_handler_t handler)
     addr.sin_port = htons(port);
     if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(server, 16) != 0)
     {
-        log_msg("cannot listen on port %u: %s (already running?)", port, strerror(errno));
+        const int saved = errno;
         close(server);
+        errno = saved;
+        return -1;
+    }
+    return server;
+}
+
+/* Hand an accepted connection to its own thread. */
+static void dispatch(int fd, const struct sockaddr_in *peer, const pthread_attr_t *attr)
+{
+    if (atomic_fetch_add(&g_active, 1) >= HTTP_MAX_CONNECTIONS)
+    {
+        atomic_fetch_sub(&g_active, 1);
+        send_simple(fd, 503, "too many connections\n");
+        close(fd);
+        return;
+    }
+    conn_t *c = calloc(1, sizeof(*c));
+    if (c == NULL)
+    {
+        atomic_fetch_sub(&g_active, 1);
+        close(fd);
+        return;
+    }
+    c->fd = fd;
+    inet_ntop(AF_INET, &peer->sin_addr, c->peer, sizeof(c->peer));
+    pthread_t thread;
+    if (pthread_create(&thread, attr, connection_thread, c) != 0)
+    {
+        atomic_fetch_sub(&g_active, 1);
+        send_simple(fd, 503, "no thread\n");
+        close(fd);
+        free(c);
+    }
+}
+
+/* Accept on one listening socket until it dies or we are told to stop.
+ * Returns true when the socket must be rebuilt. */
+static bool accept_loop(int server, const pthread_attr_t *attr)
+{
+    int aborted = 0;
+    while (!atomic_load(&g_stop))
+    {
+        struct pollfd p = {.fd = server, .events = POLLIN};
+        const int n = poll(&p, 1, 500);
+        if (n < 0 && errno != EINTR)
+        {
+            log_msg("poll: %s", strerror(errno));
+            return true;
+        }
+        if (n <= 0)
+            continue;
+        if (p.revents & (POLLERR | POLLHUP | POLLNVAL))
+        {
+            log_msg("listening socket failed (revents 0x%x)", (unsigned)p.revents);
+            return true;
+        }
+        struct sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+        const int fd = accept(server, (struct sockaddr *)&peer, &peer_len);
+        if (fd < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN)
+                continue;
+            /* A client resetting before accept gives ECONNABORTED now and then; a dead
+             * listening socket gives it on every call. */
+            if (errno == ECONNABORTED && ++aborted < 8)
+                continue;
+            log_msg("accept: %s", strerror(errno));
+            return true;
+        }
+        aborted = 0;
+        dispatch(fd, &peer, attr);
+    }
+    return false;
+}
+
+/* The network stack can be torn down under us (Settings > Network > Test Internet
+ * Connection, a cable pull, rest mode), which leaves the listening socket dead.
+ * So the listener is rebuilt whenever it fails, retrying until the network is back. */
+int http_serve(uint16_t port, http_handler_t handler)
+{
+    g_handler = handler;
+    int server = open_listener(port);
+    if (server < 0)
+    {
+        log_msg("cannot listen on port %u: %s (already running?)", port, strerror(errno));
         return -1;
     }
     log_msg("listening on port %u", port);
@@ -340,49 +432,32 @@ int http_serve(uint16_t port, http_handler_t handler)
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_attr_setstacksize(&attr, 512 * 1024);
 
-    while (!atomic_load(&g_stop))
+    for (;;)
     {
-        struct pollfd p = {.fd = server, .events = POLLIN};
-        if (poll(&p, 1, 500) <= 0)
-            continue;
-        struct sockaddr_in peer;
-        socklen_t peer_len = sizeof(peer);
-        const int fd = accept(server, (struct sockaddr *)&peer, &peer_len);
-        if (fd < 0)
+        g_listen_fd = server;
+        const bool rebuild = accept_loop(server, &attr);
+        g_listen_fd = -1;
+        close(server);
+        server = -1;
+        if (!rebuild)
+            break;
+        log_msg("network stack reset? rebuilding the listener on port %u", port);
+        int last_errno = 0;
+        while (!atomic_load(&g_stop))
         {
-            if (errno == EINTR || errno == EAGAIN || errno == ECONNABORTED)
-                continue;
-            log_msg("accept: %s", strerror(errno));
-            sleep_ms(100);
-            continue;
+            sleep_ms(2000);
+            server = open_listener(port);
+            if (server >= 0)
+                break;
+            if (errno != last_errno)
+                log_msg("re-listen on port %u: %s (retrying)", port, strerror(errno));
+            last_errno = errno;
         }
-        if (atomic_fetch_add(&g_active, 1) >= HTTP_MAX_CONNECTIONS)
-        {
-            atomic_fetch_sub(&g_active, 1);
-            send_simple(fd, 503, "too many connections\n");
-            close(fd);
-            continue;
-        }
-        conn_t *c = calloc(1, sizeof(*c));
-        if (c == NULL)
-        {
-            atomic_fetch_sub(&g_active, 1);
-            close(fd);
-            continue;
-        }
-        c->fd = fd;
-        inet_ntop(AF_INET, &peer.sin_addr, c->peer, sizeof(c->peer));
-        pthread_t thread;
-        if (pthread_create(&thread, &attr, connection_thread, c) != 0)
-        {
-            atomic_fetch_sub(&g_active, 1);
-            send_simple(fd, 503, "no thread\n");
-            close(fd);
-            free(c);
-        }
+        if (server < 0)
+            break;
+        log_msg("listening on port %u again", port);
     }
     pthread_attr_destroy(&attr);
-    close(server);
     /* Give in-flight requests (e.g. the shutdown reply) a moment. */
     for (int i = 0; i < 50 && atomic_load(&g_active) > 0; i++)
         sleep_ms(100);

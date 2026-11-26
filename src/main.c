@@ -20,6 +20,12 @@
 
 uint64_t g_started_ms;
 
+static void on_sigusr1(int sig)
+{
+    (void)sig;
+    http_kick_listener();
+}
+
 int main(int argc, char *argv[])
 {
     unsigned port = PS5MCP_DEFAULT_PORT;
@@ -33,6 +39,8 @@ int main(int argc, char *argv[])
             port = (unsigned)p;
     }
     signal(SIGPIPE, SIG_IGN);
+    /* kill -USR1 rebuilds the listener, as after a network stack reset. */
+    signal(SIGUSR1, on_sigusr1);
     g_started_ms = now_ms();
 
     const int init = backend_init();

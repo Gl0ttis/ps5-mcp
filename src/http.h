@@ -51,3 +51,7 @@ int http_serve(uint16_t port, http_handler_t handler);
 
 /* Ask http_serve to return after the current requests. */
 void http_stop(void);
+
+/* Break the listening socket, as a network stack reset does; http_serve then
+ * rebuilds it. Async-signal-safe (main wires it to SIGUSR1). */
+void http_kick_listener(void);

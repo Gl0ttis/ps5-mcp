@@ -134,6 +134,7 @@ def run(binary):
         apps(c)
         elf(c, root)
         concurrency(c)
+        survives_network_reset(c, proc, root)
         r = c.call("server_shutdown", confirm=True)
         check("server_shutdown replies", not r["isError"], r)
         try:
@@ -486,6 +487,25 @@ def concurrency(c):
     check("pad_close", not r["isError"], r)
     r = c.call("pad_close")
     check("pad_close twice is harmless", "not open" in text_of(r), text_of(r))
+
+
+def survives_network_reset(c, proc, root):
+    # A network stack reset (Test Internet Connection) kills the listening socket;
+    # SIGUSR1 breaks it the same way.
+    proc.send_signal(signal.SIGUSR1)
+    time.sleep(0.3)
+    deadline = time.time() + 8
+    r = None
+    while time.time() < deadline:
+        try:
+            r = c.call("system_info")
+            break
+        except Exception:
+            time.sleep(0.2)
+    check("server answers again after its listener dies", r is not None and not r["isError"], r)
+    with open(os.path.join(root, "server.log")) as f:
+        log = f.read()
+    check("listener rebuild is logged", "listening on port" in log and "again" in log, log[-800:])
 
 
 if __name__ == "__main__":
