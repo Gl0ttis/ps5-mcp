@@ -659,6 +659,31 @@ static uint64_t sui_find_eboot(pid_t pid)
     free(buf); return base;
 }
 
+/* Every executable mapping of at least 1 MB, in address order. sui_find_eboot
+ * assumes the main executable is the largest of them, which holds on 13.20 but
+ * not on 12.02: there SceShellUI's eboot (0x400000, ~13 MB) is smaller than one
+ * of its libraries, so the signature scans must be able to try the others. */
+static int sui_exec_regions(pid_t pid, uint64_t *st, uint64_t *en, int max)
+{
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, pid};
+    size_t sz = 0; sysctl(mib, 4, NULL, &sz, NULL, 0);
+    uint8_t *buf = malloc(sz + 0x10000); sz += 0x10000;
+    if (!buf) return 0;
+    sysctl(mib, 4, buf, &sz, NULL, 0);
+    int n = 0;
+    for (size_t off = 0; off + sizeof(struct kinfo_vmentry) <= sz && n < max;) {
+        const struct kinfo_vmentry *kv = (const struct kinfo_vmentry *)(buf + off);
+        if (kv->kve_structsize <= 0) break;
+        if ((kv->kve_protection & KVME_PROT_EXEC) &&
+            (kv->kve_end - kv->kve_start) >= 0x100000) {
+            st[n] = kv->kve_start; en[n] = kv->kve_end; n++;
+        }
+        off += kv->kve_structsize;
+    }
+    free(buf);
+    return n;
+}
+
 /* Signature-scan SceShellUI's eboot text for sceScreenshotCaptureForCoreDump.
  * The function sets the compose config at ctx+0x854 = 0x93 (flags) and
  * ctx+0x858 = 0x03 (mode-3, 720p default) via a single `mov r?, 0x300000093`
@@ -803,8 +828,7 @@ static int sui_trigger_compose(cJSON *report, uint64_t *out_shm_base)
         return -1;
     }
     cJSON_AddNumberToObject(report, "sui_pid", target);
-    const uint64_t eboot = sui_find_eboot(target);
-    if (!eboot) {
+    if (!sui_find_eboot(target)) {
         cJSON_AddStringToObject(report, "err", "could not find SceShellUI eboot base");
         return -1;
     }
@@ -820,49 +844,50 @@ static int sui_trigger_compose(cJSON *report, uint64_t *out_shm_base)
     static uint64_t c_mode_va     = 0;
     static uint64_t c_dat_va      = 0;
     static intptr_t c_scratch     = 0;
-    const int cache_hit = (c_pid == target && c_eboot == eboot &&
+    const int cache_hit = (c_pid == target && c_eboot != 0 &&
                            c_fn_coredump != 0 && c_mode_va != 0 && c_dat_va != 0);
     cJSON_AddBoolToObject(report, "cache_hit", cache_hit);
 
+    uint64_t eboot       = c_eboot;
     uint64_t fn_coredump = c_fn_coredump;
     uint64_t mode_va     = c_mode_va;
     uint64_t dat_va      = c_dat_va;
 
     if (!cache_hit) {
-        /* Scan the text segment only (no rodata/data — scanning further
-         * destabilizes the compositor, see notes in ps5-screenshot-working-state). */
-        uint64_t text_size = 0;
-        {
-            int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, target};
-            size_t sz = 0; sysctl(mib, 4, NULL, &sz, NULL, 0);
-            uint8_t *buf = malloc(sz + 0x10000); sz += 0x10000;
-            if (buf) {
-                sysctl(mib, 4, buf, &sz, NULL, 0);
-                for (size_t off = 0; off + sizeof(struct kinfo_vmentry) <= sz;) {
-                    const struct kinfo_vmentry *kv = (const struct kinfo_vmentry *)(buf + off);
-                    if (kv->kve_structsize <= 0) break;
-                    if (kv->kve_start == eboot) {
-                        text_size = kv->kve_end - kv->kve_start;
-                        break;
-                    }
-                    off += kv->kve_structsize;
-                }
-                free(buf);
-            }
-        }
-        fn_coredump = sui_scan_coredump_fn(target, eboot, text_size, &mode_va);
-        if (!fn_coredump || !mode_va) {
-            cJSON_AddStringToObject(report, "err", "sceScreenshotCaptureForCoreDump not found");
+        /* Scan executable text only (no rodata/data — scanning further
+         * destabilizes the compositor, see notes in ps5-screenshot-working-state).
+         * The largest executable mapping goes first (the eboot on 13.20), then
+         * the other large ones in address order (the eboot on 12.02). */
+        uint64_t rst[64], ren[64];
+        const int nreg = sui_exec_regions(target, rst, ren, 64);
+        if (nreg == 0) {
+            cJSON_AddStringToObject(report, "err", "no large executable mapping in SceShellUI");
             return -1;
         }
-        if (sui_scan_vt10_dat(target, eboot, text_size, &dat_va) != 0) {
-            cJSON_AddStringToObject(report, "err", "DAT_013a84a0 not found");
+        int big = 0;
+        for (int i = 1; i < nreg; i++)
+            if (ren[i] - rst[i] > ren[big] - rst[big]) big = i;
+        int found = 0, found_fn = 0;
+        for (int k = 0; k < nreg && !found; k++) {
+            const int i = k == 0 ? big : (k - 1 < big ? k - 1 : k);
+            const uint64_t size = ren[i] - rst[i];
+            uint64_t m = 0, d = 0;
+            const uint64_t f = sui_scan_coredump_fn(target, rst[i], size, &m);
+            if (!f || !m) continue;
+            found_fn = 1;
+            if (sui_scan_vt10_dat(target, rst[i], size, &d) != 0) continue;
+            eboot = rst[i]; fn_coredump = f; mode_va = m; dat_va = d; found = 1;
+        }
+        if (!found) {
+            cJSON_AddStringToObject(report, "err", found_fn ? "DAT_013a84a0 not found"
+                                    : "sceScreenshotCaptureForCoreDump not found");
             return -1;
         }
         c_pid = target; c_eboot = eboot;
         c_fn_coredump = fn_coredump; c_mode_va = mode_va; c_dat_va = dat_va;
         c_scratch = 0; /* new PID → previous scratch VMA is gone */
     }
+    cJSON_AddNumberToObject(report, "eboot", (double)eboot);
     cJSON_AddNumberToObject(report, "fn_coredump", (double)fn_coredump);
     cJSON_AddNumberToObject(report, "dat_013a84a0_va", (double)dat_va);
 
